@@ -25,7 +25,7 @@ link_directories(
 )
 
 # 3rdparty link
-link_libraries(glfw3 d3d12.lib dxgi.lib dxguid.lib windowsapp.lib)
+link_libraries(glfw3 d3d12.lib d3dcompiler.lib dxgi.lib dxguid.lib windowsapp.lib)
 
 # Projects
 include_directories(
@@ -38,3 +38,8 @@ set(SOURCE_FILES
 
 # List projects
 add_executable(${PROJECT_NAME}_01 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_01.cpp)
+
+add_custom_command(TARGET  ${PROJECT_NAME}_01 PRE_BUILD
+				   COMMAND ${CMAKE_COMMAND} -E copy_directory
+				   ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:${PROJECT_NAME}_01>/data
+)

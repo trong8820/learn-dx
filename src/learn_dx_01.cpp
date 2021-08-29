@@ -1,5 +1,7 @@
 #include "entry.h"
 
+#include <fstream>
+
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 
@@ -9,6 +11,8 @@
 
 #include <dxgi1_4.h>
 #include <d3d12.h>
+
+#include <d3dcompiler.h>
 
 #if defined(_DEBUG)
 #include <dxgidebug.h>
@@ -42,6 +46,13 @@ winrt::com_ptr<ID3D12Fence>					g_fence;
 UINT64                                      g_fenceValues[MAX_FRAMES_IN_FLIGHT];
 winrt::handle								g_fenceEvent;
 
+// Triangle
+winrt::com_ptr<ID3D12RootSignature>			g_rootSignature;
+winrt::com_ptr<ID3D12PipelineState>			g_pipeline;
+winrt::com_ptr<ID3D12Resource>				g_vertexBuffer;
+D3D12_VERTEX_BUFFER_VIEW					g_vertexBufferView;
+
+// Other
 UINT g_rtvDescriptorSize;
 
 UINT g_backBufferIndex = 0;
@@ -96,9 +107,64 @@ void createDevice()
 		winrt::check_hresult(adapter->GetDesc1(&adapterDesc));
 
 		if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-		if (SUCCEEDED(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, g_device.put_void()))) break;
+		if (SUCCEEDED(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_12_0, IID_ID3D12Device, g_device.put_void()))) break;
 	}
 
+	// Check shader model 6 support
+	D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_5 };
+	if ((FAILED(g_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))) || (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_0)))
+	{
+		throw std::runtime_error("Shader Model 6.5 is not supported!");
+	}
+
+	// Root signature
+	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
+	rootSignatureDesc.Init(0, nullptr, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	winrt::com_ptr<ID3DBlob> signature;
+	winrt::check_hresult(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.put(), nullptr));
+	winrt::check_hresult(g_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_ID3D12RootSignature, g_rootSignature.put_void()));
+
+	// Graphics pipeline
+	winrt::com_ptr<ID3DBlob> vertexShader;
+	winrt::com_ptr<ID3DBlob> pixelShader;
+
+#if defined(_DEBUG)
+	// Enable better shader debugging with the graphics debugging tools.
+	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+	UINT compileFlags = 0;
+#endif
+
+	{
+		std::ifstream ifs("data/basic_triangle.vert.bin", std::ios::binary | std::ios::ate);
+		std::streamsize size = ifs.tellg();
+		ifs.seekg(0, std::ios::beg);
+
+		std::vector<char> buffer(size);
+		if (ifs.read(buffer.data(), size))
+		{
+			winrt::com_ptr<ID3DBlob> vertexShaderError;
+			HRESULT hr = D3DCompile(buffer.data(), buffer.size(), nullptr, nullptr, nullptr, "main", "vs_6_5", compileFlags, 0, vertexShader.put(), vertexShaderError.put());
+			std::cout << (char*)vertexShaderError->GetBufferPointer() << std::endl;
+			winrt::check_hresult(D3DCompile(buffer.data(), buffer.size(), nullptr, nullptr, nullptr, "main", "vs_5_0", compileFlags, 0, vertexShader.put(), nullptr));
+		}
+		ifs.close();
+	}
+	{
+		std::ifstream ifs("data/basic_triangle.frag.bin", std::ios::binary | std::ios::ate);
+		std::streamsize size = ifs.tellg();
+		ifs.seekg(0, std::ios::beg);
+
+		std::vector<char> buffer(size);
+		if (ifs.read(buffer.data(), size))
+		{
+			winrt::check_hresult(D3DCompile(buffer.data(), buffer.size(), nullptr, nullptr, nullptr, "main", "ps_6_0", compileFlags, 0, pixelShader.put(), nullptr));
+		}
+		ifs.close();
+	}
+
+	// Create the command queue.
 #if defined(_DEBUG)
 	winrt::com_ptr<ID3D12InfoQueue> infoQueue = g_device.as<ID3D12InfoQueue>();
 	infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
@@ -115,7 +181,6 @@ void createDevice()
 	infoQueue->AddStorageFilterEntries(&infoQueueFilter);
 #endif
 
-	// Create the command queue.
 	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -145,6 +210,38 @@ void createDevice()
 	winrt::check_hresult(g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0].get(), nullptr, IID_ID3D12CommandList, g_commandList.put_void()));
 	winrt::check_hresult(g_commandList->Close());
 
+	// Triangle
+	float triangleVertices[] =
+	{
+		0.0f, 0.25f,		1.0f, 0.0f, 0.0f, 1.0f,
+		0.25f, -0.25f,		0.0f, 1.0f, 0.0f, 1.0f,
+		-0.25f, -0.25f,		0.0f, 0.0f, 1.0f, 1.0f
+	};
+
+	const UINT vertexBufferSize = 3 * 7 * sizeof(float);
+
+	winrt::check_hresult(g_device->CreateCommittedResource
+	(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_ID3D12Resource,
+		g_vertexBuffer.put_void()
+	));
+
+	// Copy the triangle data to the vertex buffer.
+	UINT8* pVertexDataBegin;
+	CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
+	winrt::check_hresult(g_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+	memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
+	g_vertexBuffer->Unmap(0, nullptr);
+
+	g_vertexBufferView.BufferLocation = g_vertexBuffer->GetGPUVirtualAddress();
+	g_vertexBufferView.StrideInBytes = 7 * sizeof(float);
+	g_vertexBufferView.SizeInBytes = vertexBufferSize;
+
 	// Fence
 	winrt::check_hresult(g_device->CreateFence(g_fenceValues[g_backBufferIndex], D3D12_FENCE_FLAG_NONE, IID_ID3D12Fence, g_fence.put_void()));
 	g_fenceValues[g_backBufferIndex]++;
@@ -153,13 +250,6 @@ void createDevice()
 	if (!g_fenceEvent)
 	{
 		throw std::system_error(std::error_code(static_cast<int>(GetLastError()), std::system_category()), "CreateEventEx");
-	}
-
-	// Check shader model 6 support
-	D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_0 };
-	if ((FAILED(g_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))) || (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_0)))
-	{
-		throw std::runtime_error("Shader Model 6.0 is not supported!");
 	}
 }
 
@@ -379,6 +469,12 @@ void update()
 void draw()
 {
 	clear();
+
+	g_commandList->SetPipelineState(g_pipeline.get());
+	g_commandList->SetGraphicsRootSignature(g_rootSignature.get());
+	g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
+	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	g_commandList->DrawInstanced(3, 1, 0, 0);
 
 	present();
 }
