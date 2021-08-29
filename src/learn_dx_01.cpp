@@ -107,14 +107,14 @@ void createDevice()
 		winrt::check_hresult(adapter->GetDesc1(&adapterDesc));
 
 		if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-		if (SUCCEEDED(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_12_0, IID_ID3D12Device, g_device.put_void()))) break;
+		if (SUCCEEDED(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, g_device.put_void()))) break;
 	}
 
 	// Check shader model 6 support
-	D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_5 };
+	D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_0 };
 	if ((FAILED(g_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))) || (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_0)))
 	{
-		throw std::runtime_error("Shader Model 6.5 is not supported!");
+		throw std::runtime_error("Shader Model 6.0 is not supported!");
 	}
 
 	// Root signature
@@ -126,8 +126,8 @@ void createDevice()
 	winrt::check_hresult(g_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_ID3D12RootSignature, g_rootSignature.put_void()));
 
 	// Graphics pipeline
-	winrt::com_ptr<ID3DBlob> vertexShader;
-	winrt::com_ptr<ID3DBlob> pixelShader;
+	std::vector<char> vertexShader;
+	std::vector<char> pixelShader;
 
 #if defined(_DEBUG)
 	// Enable better shader debugging with the graphics debugging tools.
@@ -137,32 +137,50 @@ void createDevice()
 #endif
 
 	{
-		std::ifstream ifs("data/basic_triangle.vert.bin", std::ios::binary | std::ios::ate);
+		std::ifstream ifs("data/basic_triangle.vert.cso", std::ios::binary | std::ios::ate);
 		std::streamsize size = ifs.tellg();
 		ifs.seekg(0, std::ios::beg);
 
-		std::vector<char> buffer(size);
-		if (ifs.read(buffer.data(), size))
+		vertexShader.resize(size);
+		if (ifs.read(vertexShader.data(), size))
 		{
-			winrt::com_ptr<ID3DBlob> vertexShaderError;
-			HRESULT hr = D3DCompile(buffer.data(), buffer.size(), nullptr, nullptr, nullptr, "main", "vs_6_5", compileFlags, 0, vertexShader.put(), vertexShaderError.put());
-			std::cout << (char*)vertexShaderError->GetBufferPointer() << std::endl;
-			winrt::check_hresult(D3DCompile(buffer.data(), buffer.size(), nullptr, nullptr, nullptr, "main", "vs_5_0", compileFlags, 0, vertexShader.put(), nullptr));
 		}
 		ifs.close();
 	}
 	{
-		std::ifstream ifs("data/basic_triangle.frag.bin", std::ios::binary | std::ios::ate);
+		std::ifstream ifs("data/basic_triangle.frag.cso", std::ios::binary | std::ios::ate);
 		std::streamsize size = ifs.tellg();
 		ifs.seekg(0, std::ios::beg);
 
-		std::vector<char> buffer(size);
-		if (ifs.read(buffer.data(), size))
+		pixelShader.resize(size);
+		if (ifs.read(pixelShader.data(), size))
 		{
-			winrt::check_hresult(D3DCompile(buffer.data(), buffer.size(), nullptr, nullptr, nullptr, "main", "ps_6_0", compileFlags, 0, pixelShader.put(), nullptr));
 		}
 		ifs.close();
 	}
+
+	// Define the vertex input layout.
+	D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+	};
+	// Describe and create the graphics pipeline state object (PSO).
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
+	psoDesc.pRootSignature = g_rootSignature.get();
+	psoDesc.VS = CD3DX12_SHADER_BYTECODE(vertexShader.data(), vertexShader.size());
+	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pixelShader.data(), pixelShader.size());
+	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+	psoDesc.SampleDesc.Count = 1;
+	winrt::check_hresult(g_device->CreateGraphicsPipelineState(&psoDesc, IID_ID3D12PipelineState, g_pipeline.put_void()));
 
 	// Create the command queue.
 #if defined(_DEBUG)
@@ -218,7 +236,7 @@ void createDevice()
 		-0.25f, -0.25f,		0.0f, 0.0f, 1.0f, 1.0f
 	};
 
-	const UINT vertexBufferSize = 3 * 7 * sizeof(float);
+	const UINT vertexBufferSize = 3 * 6 * sizeof(float);
 
 	winrt::check_hresult(g_device->CreateCommittedResource
 	(
@@ -239,7 +257,7 @@ void createDevice()
 	g_vertexBuffer->Unmap(0, nullptr);
 
 	g_vertexBufferView.BufferLocation = g_vertexBuffer->GetGPUVirtualAddress();
-	g_vertexBufferView.StrideInBytes = 7 * sizeof(float);
+	g_vertexBufferView.StrideInBytes = 6 * sizeof(float);
 	g_vertexBufferView.SizeInBytes = vertexBufferSize;
 
 	// Fence
