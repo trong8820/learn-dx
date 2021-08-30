@@ -31,6 +31,11 @@ static float4 vColor;
 static float3 aColor;
 static float2 aPos;
 
+cbuffer Constants : register(b0)
+{
+	float2 offset;
+};
+
 struct SPIRV_Cross_Input
 {
 	float2 aPos : POSITION;
@@ -46,7 +51,7 @@ struct SPIRV_Cross_Output
 void vert_main()
 {
 	vColor = float4(aColor, 1.0f);
-	gl_Position = float4(aPos, 0.0f, 1.0f);
+	gl_Position = float4(aPos + offset, 0.0f, 1.0f);
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
@@ -123,6 +128,8 @@ UINT g_rtvDescriptorSize;
 
 UINT g_backBufferIndex = 0;
 
+float g_offsetX = 0.0f;
+
 void onDeviceLost();
 
 void waitForGpu() noexcept
@@ -186,8 +193,11 @@ void createDevice()
 	*/
 
 	// Root signature
+	CD3DX12_ROOT_PARAMETER parameter;
+	parameter.InitAsConstants(2, 0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+
 	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-	rootSignatureDesc.Init(0, nullptr, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+	rootSignatureDesc.Init(1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	winrt::com_ptr<ID3DBlob> signature;
 	winrt::check_hresult(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.put(), nullptr));
@@ -559,7 +569,8 @@ void size()
 
 void update()
 {
-
+	g_offsetX += 0.001f;
+	if (g_offsetX > 0.5f) g_offsetX = -0.5f;
 }
 
 void draw()
@@ -568,6 +579,8 @@ void draw()
 
 	g_commandList->SetPipelineState(g_pipeline.get());
 	g_commandList->SetGraphicsRootSignature(g_rootSignature.get());
+	float offset[] = { g_offsetX, 0.2f};
+	g_commandList->SetGraphicsRoot32BitConstants(0, 2, offset, 0);
 	g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_commandList->DrawInstanced(3, 1, 0, 0);

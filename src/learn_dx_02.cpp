@@ -31,6 +31,11 @@ static float4 vColor;
 static float3 aColor;
 static float2 aPos;
 
+cbuffer Constants : register(b0)
+{
+	float2 offset;
+};
+
 struct SPIRV_Cross_Input
 {
 	float2 aPos : POSITION;
@@ -46,7 +51,7 @@ struct SPIRV_Cross_Output
 void vert_main()
 {
 	vColor = float4(aColor, 1.0f);
-	gl_Position = float4(aPos, 0.0f, 1.0f);
+	gl_Position = float4(aPos + offset, 0.0f, 1.0f);
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
@@ -123,6 +128,15 @@ UINT g_rtvDescriptorSize;
 
 UINT g_backBufferIndex = 0;
 
+// Const
+UINT										g_alignedConstantBufferSize = ((2 * sizeof(float)) + 255) & ~255;
+winrt::com_ptr<ID3D12DescriptorHeap>		g_cbvHeap;
+winrt::com_ptr<ID3D12Resource>				g_constantBuffer;
+INT											g_cbvDescriptorSize;
+UINT8*										g_mappedConstantBuffer;
+
+float g_offsetX = 0.0f;
+
 void onDeviceLost();
 
 void waitForGpu() noexcept
@@ -186,8 +200,14 @@ void createDevice()
 	*/
 
 	// Root signature
+	CD3DX12_DESCRIPTOR_RANGE range;
+	range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
+
+	CD3DX12_ROOT_PARAMETER parameter;
+	parameter.InitAsDescriptorTable(1, &range, D3D12_SHADER_VISIBILITY_VERTEX);
+
 	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-	rootSignatureDesc.Init(0, nullptr, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+	rootSignatureDesc.Init(1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	winrt::com_ptr<ID3DBlob> signature;
 	winrt::check_hresult(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.put(), nullptr));
@@ -337,6 +357,47 @@ void createDevice()
 	g_vertexBufferView.BufferLocation = g_vertexBuffer->GetGPUVirtualAddress();
 	g_vertexBufferView.StrideInBytes = 6 * sizeof(float);
 	g_vertexBufferView.SizeInBytes = vertexBufferSize;
+
+	// Constant
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.NumDescriptors = MAX_FRAMES_IN_FLIGHT;
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	winrt::check_hresult(g_device->CreateDescriptorHeap(&heapDesc, IID_ID3D12DescriptorHeap, g_cbvHeap.put_void()));
+
+	CD3DX12_RESOURCE_DESC constantBufferDesc = CD3DX12_RESOURCE_DESC::Buffer(MAX_FRAMES_IN_FLIGHT * g_alignedConstantBufferSize);
+	winrt::check_hresult(g_device->CreateCommittedResource
+	(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&constantBufferDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_ID3D12Resource,
+		g_constantBuffer.put_void()
+	));
+
+	D3D12_GPU_VIRTUAL_ADDRESS cbvGpuAddress = g_constantBuffer->GetGPUVirtualAddress();
+	CD3DX12_CPU_DESCRIPTOR_HANDLE cbvCpuHandle(g_cbvHeap->GetCPUDescriptorHandleForHeapStart());
+	g_cbvDescriptorSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+	{
+		D3D12_CONSTANT_BUFFER_VIEW_DESC desc;
+		desc.BufferLocation = cbvGpuAddress;
+		desc.SizeInBytes = g_alignedConstantBufferSize;
+		g_device->CreateConstantBufferView(&desc, cbvCpuHandle);
+
+		cbvGpuAddress += desc.SizeInBytes;
+		cbvCpuHandle.Offset(g_cbvDescriptorSize);
+	}
+
+	// Map the constant buffers.
+	{
+		CD3DX12_RANGE readRange(0, 10);		// We do not intend to read from this resource on the CPU.
+		winrt::check_hresult(g_constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&g_mappedConstantBuffer)));
+		ZeroMemory(g_mappedConstantBuffer, MAX_FRAMES_IN_FLIGHT * g_alignedConstantBufferSize);
+	}
 
 	// Fence
 	winrt::check_hresult(g_device->CreateFence(g_fenceValues[g_backBufferIndex], D3D12_FENCE_FLAG_NONE, IID_ID3D12Fence, g_fence.put_void()));
@@ -559,7 +620,11 @@ void size()
 
 void update()
 {
-
+	g_offsetX += 0.001f;
+	if (g_offsetX > 0.5f) g_offsetX = -0.5f;
+	UINT8* destination = g_mappedConstantBuffer + (g_backBufferIndex * g_alignedConstantBufferSize);
+	float offset[] = { g_offsetX, 0.2f};
+	memcpy(destination, offset, 2*sizeof(float));
 }
 
 void draw()
@@ -568,6 +633,14 @@ void draw()
 
 	g_commandList->SetPipelineState(g_pipeline.get());
 	g_commandList->SetGraphicsRootSignature(g_rootSignature.get());
+
+	ID3D12DescriptorHeap* ppHeaps[] = { g_cbvHeap.get() };
+	g_commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+
+	// Bind the current frame's constant buffer to the pipeline.
+	CD3DX12_GPU_DESCRIPTOR_HANDLE gpuHandle(g_cbvHeap->GetGPUDescriptorHandleForHeapStart(), g_backBufferIndex, g_cbvDescriptorSize);
+	g_commandList->SetGraphicsRootDescriptorTable(0, gpuHandle);
+
 	g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_commandList->DrawInstanced(3, 1, 0, 0);

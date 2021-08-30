@@ -22,7 +22,7 @@ auto run() -> int
 	if (glfwInit() == GLFW_FALSE) return EXIT_FAILURE;
 
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	g_pWindow = glfwCreateWindow(800, 600, "Learn GL", nullptr, nullptr);
+	g_pWindow = glfwCreateWindow(800, 600, "Learn DX", nullptr, nullptr);
 	if (g_pWindow == nullptr) return EXIT_FAILURE;
 
 	glfwGetWindowSize(g_pWindow, &gWidth, &gHeight);
