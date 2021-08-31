@@ -2,6 +2,8 @@
 
 #include <fstream>
 
+#include <spng.h>
+
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 
@@ -27,52 +29,59 @@ const int MAX_FRAMES_IN_FLIGHT = 2;
 
 const char* vertexShaderSource = R"(
 static float4 gl_Position;
+static float2 vTexCoord;
+static float2 aTexCoord;
 static float4 vColor;
-static float3 aColor;
+static float4 aColor;
 static float2 aPos;
-
-cbuffer Constants : register(b0)
-{
-	float2 offset;
-};
 
 struct SPIRV_Cross_Input
 {
-	float2 aPos : POSITION;
-	float3 aColor : COLOR;
+	float2 aPos : POSITION0;
+	float2 aTexCoord : TEXCOORD0;
+	float4 aColor : COLOR0;
 };
 
 struct SPIRV_Cross_Output
 {
-	float4 vColor : COLOR;
+	float2 vTexCoord : TEXCOORD0;
+	float4 vColor : COLOR0;
 	float4 gl_Position : SV_Position;
 };
 
 void vert_main()
 {
-	vColor = float4(aColor, 1.0f);
-	gl_Position = float4(aPos + offset, 0.0f, 1.0f);
+	vTexCoord = aTexCoord;
+	vColor = aColor;
+	gl_Position = float4(aPos, 0.0f, 1.0f);
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
 {
+	aTexCoord = stage_input.aTexCoord;
 	aColor = stage_input.aColor;
 	aPos = stage_input.aPos;
 	vert_main();
 	SPIRV_Cross_Output stage_output;
 	stage_output.gl_Position = gl_Position;
+	stage_output.vTexCoord = vTexCoord;
 	stage_output.vColor = vColor;
 	return stage_output;
 }
 )";
 
 const char* fragmentShaderSource = R"(
+Texture2D<float4> texture0 : register(t0);
+SamplerState _texture0_sampler : register(s0);
+
 static float4 FragColor;
 static float4 vColor;
+static float2 vTexCoord;
 
 struct SPIRV_Cross_Input
 {
-	float4 vColor : COLOR;
+	float2 vTexCoord : TEXCOORD0;
+	float4 vColor : COLOR0;
 };
 
 struct SPIRV_Cross_Output
@@ -82,18 +91,18 @@ struct SPIRV_Cross_Output
 
 void frag_main()
 {
-	FragColor = vColor;
+	FragColor = vColor * texture0.Sample(_texture0_sampler, vTexCoord);
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
 {
 	vColor = stage_input.vColor;
+	vTexCoord = stage_input.vTexCoord;
 	frag_main();
 	SPIRV_Cross_Output stage_output;
 	stage_output.FragColor = FragColor;
 	return stage_output;
 }
-
 )";
 
 HWND g_window;
@@ -122,13 +131,21 @@ winrt::com_ptr<ID3D12RootSignature>			g_rootSignature;
 winrt::com_ptr<ID3D12PipelineState>			g_pipeline;
 winrt::com_ptr<ID3D12Resource>				g_vertexBuffer;
 D3D12_VERTEX_BUFFER_VIEW					g_vertexBufferView;
+winrt::com_ptr<ID3D12Resource>				g_indexBuffer;
+D3D12_INDEX_BUFFER_VIEW						g_indexBufferView;
 
 // Other
 UINT g_rtvDescriptorSize;
 
 UINT g_backBufferIndex = 0;
 
-float g_offsetX = 0.0f;
+// Texture
+winrt::com_ptr<ID3D12Resource>				g_texture;
+winrt::com_ptr<ID3D12DescriptorHeap>		g_srvDescriptorHeap;
+
+std::vector<unsigned char> g_pixels;
+UINT g_textureWidth;
+UINT g_textureHeight;
 
 void onDeviceLost();
 
@@ -193,11 +210,29 @@ void createDevice()
 	*/
 
 	// Root signature
-	CD3DX12_ROOT_PARAMETER parameter;
-	parameter.InitAsConstants(2, 0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+	CD3DX12_DESCRIPTOR_RANGE range;
+	range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND);
+
+	CD3DX12_ROOT_PARAMETER rootParameter;
+	rootParameter.InitAsDescriptorTable(1, &range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+	D3D12_STATIC_SAMPLER_DESC sampler{};
+	sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+	sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	sampler.MipLODBias = 0;
+	sampler.MaxAnisotropy = 0;
+	sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+	sampler.MinLOD = 0.0f;
+	sampler.MaxLOD = D3D12_FLOAT32_MAX;
+	sampler.ShaderRegister = 0;
+	sampler.RegisterSpace = 0;
+	sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-	rootSignatureDesc.Init(1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+	rootSignatureDesc.Init(1, &rootParameter, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	winrt::com_ptr<ID3DBlob> signature;
 	winrt::check_hresult(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.put(), nullptr));
@@ -248,9 +283,12 @@ void createDevice()
 	// Define the vertex input layout.
 	D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
 	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "POSITION",	0, DXGI_FORMAT_R32G32_FLOAT,		0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD",	0, DXGI_FORMAT_R32G32_FLOAT,		0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR",		0, DXGI_FORMAT_R32G32B32A32_FLOAT,	0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
+	D3D12_RASTERIZER_DESC rasterizerDesc = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	rasterizerDesc.CullMode = D3D12_CULL_MODE_NONE;
 	// Describe and create the graphics pipeline state object (PSO).
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 	psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
@@ -259,7 +297,7 @@ void createDevice()
 	//psoDesc.PS = CD3DX12_SHADER_BYTECODE(pixelShader.data(), pixelShader.size());
 	psoDesc.VS = CD3DX12_SHADER_BYTECODE(vertexShader.get());
 	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pixelShader.get());
-	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	psoDesc.RasterizerState = rasterizerDesc;
 	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 	psoDesc.DepthStencilState.DepthEnable = FALSE;
 	psoDesc.DepthStencilState.StencilEnable = FALSE;
@@ -306,6 +344,12 @@ void createDevice()
 	winrt::check_hresult(g_device->CreateDescriptorHeap(&rtvDescriptorHeapDesc, IID_ID3D12DescriptorHeap, g_rtvDescriptorHeap.put_void()));
 	winrt::check_hresult(g_device->CreateDescriptorHeap(&dsvDescriptorHeapDesc, IID_ID3D12DescriptorHeap, g_dsvDescriptorHeap.put_void()));
 
+	D3D12_DESCRIPTOR_HEAP_DESC srvDescriptorHeapDesc = {};
+	srvDescriptorHeapDesc.NumDescriptors = 1;
+	srvDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	srvDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	winrt::check_hresult(g_device->CreateDescriptorHeap(&srvDescriptorHeapDesc, IID_ID3D12DescriptorHeap, g_srvDescriptorHeap.put_void()));
+
 	g_rtvDescriptorSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
 	for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -314,39 +358,130 @@ void createDevice()
 	}
 
 	winrt::check_hresult(g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0].get(), nullptr, IID_ID3D12CommandList, g_commandList.put_void()));
-	winrt::check_hresult(g_commandList->Close());
+	//winrt::check_hresult(g_commandList->Close());
 
 	// Triangle
 	float triangleVertices[] =
 	{
-		0.0f, 0.25f,		1.0f, 0.0f, 0.0f, 1.0f,
-		0.25f, -0.25f,		0.0f, 1.0f, 0.0f, 1.0f,
-		-0.25f, -0.25f,		0.0f, 0.0f, 1.0f, 1.0f
+		0.5f, 0.5f,			1.0f, 0.0f,		1.0f, 0.0f, 0.0f, 1.0f,
+		0.5f, -0.5f,		1.0f, 1.0f,		0.0f, 1.0f, 0.0f, 1.0f,
+		-0.5f, -0.5f,		0.0f, 1.0f,		0.0f, 0.0f, 1.0f, 1.0f,
+		-0.5f, 0.5f,		0.0f, 0.0f,		0.0f, 0.0f, 1.0f, 1.0f
 	};
 
-	const UINT vertexBufferSize = 3 * 6 * sizeof(float);
+	const UINT vertexBufferSize = 4 * 8 * sizeof(float);
 
-	winrt::check_hresult(g_device->CreateCommittedResource
-	(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_ID3D12Resource,
-		g_vertexBuffer.put_void()
-	));
+	const UINT indices[] = {
+		0, 1, 3,
+		1, 2, 3
+	};
+	const UINT indexBufferSize = 3 * 2 * sizeof(UINT);
 
-	// Copy the triangle data to the vertex buffer.
-	UINT8* pVertexDataBegin;
-	CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
-	winrt::check_hresult(g_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
-	memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
-	g_vertexBuffer->Unmap(0, nullptr);
+	{
+		winrt::check_hresult(g_device->CreateCommittedResource
+		(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_ID3D12Resource,
+			g_vertexBuffer.put_void()
+		));
 
-	g_vertexBufferView.BufferLocation = g_vertexBuffer->GetGPUVirtualAddress();
-	g_vertexBufferView.StrideInBytes = 6 * sizeof(float);
-	g_vertexBufferView.SizeInBytes = vertexBufferSize;
+		// Copy the triangle data to the vertex buffer.
+		UINT8* pVertexDataBegin;
+		CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
+		winrt::check_hresult(g_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+		memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
+		g_vertexBuffer->Unmap(0, nullptr);
+
+		g_vertexBufferView.BufferLocation = g_vertexBuffer->GetGPUVirtualAddress();
+		g_vertexBufferView.StrideInBytes = 8 * sizeof(float);
+		g_vertexBufferView.SizeInBytes = vertexBufferSize;
+	}
+
+	{
+		winrt::check_hresult(g_device->CreateCommittedResource
+		(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(indexBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_ID3D12Resource,
+			g_indexBuffer.put_void()
+		));
+
+		// Copy the triangle data to the vertex buffer.
+		UINT8* pIndexDataBegin;
+		CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
+		winrt::check_hresult(g_indexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pIndexDataBegin)));
+		memcpy(pIndexDataBegin, indices, sizeof(indices));
+		g_indexBuffer->Unmap(0, nullptr);
+
+		g_indexBufferView.BufferLocation = g_indexBuffer->GetGPUVirtualAddress();
+		g_indexBufferView.Format = DXGI_FORMAT_R32_UINT;
+		g_indexBufferView.SizeInBytes = indexBufferSize;
+	}
+
+	// Texture
+	winrt::com_ptr<ID3D12Resource> textureUploadHeap;
+	{
+		D3D12_RESOURCE_DESC textureDesc = {};
+		textureDesc.MipLevels = 1;
+		textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		textureDesc.Width = g_textureWidth;
+		textureDesc.Height = g_textureHeight;
+		textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+		textureDesc.DepthOrArraySize = 1;
+		textureDesc.SampleDesc.Count = 1;
+		textureDesc.SampleDesc.Quality = 0;
+		textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+
+		winrt::check_hresult(g_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+			D3D12_HEAP_FLAG_NONE,
+			&textureDesc,
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr,
+			IID_ID3D12Resource,
+			g_texture.put_void()
+		));
+
+		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(g_texture.get(), 0, 1);
+
+		winrt::check_hresult(g_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_ID3D12Resource,
+			textureUploadHeap.put_void()
+		));
+
+		D3D12_SUBRESOURCE_DATA textureData{};
+		textureData.pData = g_pixels.data();
+		textureData.RowPitch = g_textureWidth * 4U;
+		textureData.SlicePitch = textureData.RowPitch * g_textureHeight;
+
+		UpdateSubresources(g_commandList.get(), g_texture.get(), textureUploadHeap.get(), 0, 0, 1, &textureData);
+		g_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(g_texture.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
+		// Describe and create a SRV for the texture.
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = textureDesc.Format;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+		g_device->CreateShaderResourceView(g_texture.get(), &srvDesc, g_srvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+	}
+
+	// Close the command list and execute it to begin the initial GPU setup.
+	winrt::check_hresult(g_commandList->Close());
+	ID3D12CommandList* ppCommandLists[] = {g_commandList.get() };
+	g_commandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 
 	// Fence
 	winrt::check_hresult(g_device->CreateFence(g_fenceValues[g_backBufferIndex], D3D12_FENCE_FLAG_NONE, IID_ID3D12Fence, g_fence.put_void()));
@@ -357,6 +492,8 @@ void createDevice()
 	{
 		throw std::system_error(std::error_code(static_cast<int>(GetLastError()), std::system_category()), "CreateEventEx");
 	}
+
+	waitForGpu();
 }
 
 void createResources()
@@ -543,6 +680,34 @@ void present()
 
 bool init()
 {
+	// Read image
+	std::ifstream ifs("data/pokemon.png", std::ios::binary | std::ios::ate);
+	std::streamsize size = ifs.tellg();
+	ifs.seekg(0, std::ios::beg);
+
+	std::vector<char> buffer(size);
+	if (ifs.read(buffer.data(), size))
+	{
+		spng_ctx* ctx = spng_ctx_new(0);
+
+		spng_set_png_buffer(ctx, buffer.data(), buffer.size());
+
+		spng_ihdr ihdr;
+		spng_get_ihdr(ctx, &ihdr);
+		g_textureWidth = ihdr.width;
+		g_textureHeight = ihdr.height;
+
+		size_t out_size;
+		spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size);
+
+		//std::vector<unsigned char> pixels(out_size);
+		g_pixels.resize(out_size);
+		spng_decode_image(ctx, g_pixels.data(), out_size, SPNG_FMT_RGBA8, 0);
+
+		spng_ctx_free(ctx);
+	}
+	ifs.close();
+
 	g_window = glfwGetWin32Window(g_pWindow);
 	createDevice();
 	createResources();
@@ -569,8 +734,7 @@ void size()
 
 void update()
 {
-	g_offsetX += 0.001f;
-	if (g_offsetX > 0.5f) g_offsetX = -0.5f;
+
 }
 
 void draw()
@@ -579,16 +743,16 @@ void draw()
 
 	g_commandList->SetPipelineState(g_pipeline.get());
 	g_commandList->SetGraphicsRootSignature(g_rootSignature.get());
-	float offset[] = { g_offsetX, 0.2f};
-	g_commandList->SetGraphicsRoot32BitConstants(0, 2, offset, 0);
+
+	ID3D12DescriptorHeap* ppHeaps[] = { g_srvDescriptorHeap.get() };
+	g_commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+
+	g_commandList->SetGraphicsRootDescriptorTable(0, g_srvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
 	g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
+	g_commandList->IASetIndexBuffer(&g_indexBufferView);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	g_commandList->DrawInstanced(3, 1, 0, 0);
-
-	float offset1[] = { g_offsetX, -0.2f };
-	g_commandList->SetGraphicsRoot32BitConstants(0, 2, offset1, 0);
-
-	g_commandList->DrawInstanced(3, 1, 0, 0);
+	g_commandList->DrawIndexedInstanced(6, 1, 0, 0, 0);
 
 	present();
 }
