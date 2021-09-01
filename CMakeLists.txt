@@ -47,9 +47,10 @@ set(SOURCE_FILES
 #add_executable(${PROJECT_NAME}_02 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_02.cpp)
 #add_executable(${PROJECT_NAME}_03 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_03.cpp)
 #add_executable(${PROJECT_NAME}_04 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_04.cpp)
-add_executable(${PROJECT_NAME}_05 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_05.cpp)
+#add_executable(${PROJECT_NAME}_05 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_05.cpp)
+add_executable(${PROJECT_NAME}_06 ${3RDPARTY_SOURCE_FILES} ${SOURCE_FILES} ${CMAKE_SOURCE_DIR}/src/learn_dx_06.cpp)
 
-add_custom_command(TARGET  ${PROJECT_NAME}_05 PRE_BUILD
-				   COMMAND ${CMAKE_COMMAND} -E copy_directory
-				   ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:${PROJECT_NAME}_05>/data
-)
+#add_custom_command(TARGET  ${PROJECT_NAME}_05 PRE_BUILD
+#				   COMMAND ${CMAKE_COMMAND} -E copy_directory
+#				   ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:${PROJECT_NAME}_05>/data
+#)
