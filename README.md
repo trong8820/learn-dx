@@ -11,3 +11,7 @@ https://developer.nvidia.com/sites/default/files/akamai/gamedev/files/gdc12/Effi
 
 - e06: Render to target
 - e07: Compute (Texture and Buffer) (Asynchronous and Synchronous) https://docs.microsoft.com/en-us/samples/microsoft/directx-graphics-samples/d3d12-n-body-gravity-sample-uwp/
+
+==================================================================================================
+
+- e08: Multiple vertex buffer
