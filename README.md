@@ -10,4 +10,4 @@
 https://developer.nvidia.com/sites/default/files/akamai/gamedev/files/gdc12/Efficient_Buffer_Management_McDonald.pdf
 
 - e06: Render to target
-- e06: Compute
+- e07: Compute (Texture and Buffer) (Asynchronous and Synchronous) https://docs.microsoft.com/en-us/samples/microsoft/directx-graphics-samples/d3d12-n-body-gravity-sample-uwp/
